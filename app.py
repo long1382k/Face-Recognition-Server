@@ -100,7 +100,19 @@ def add_face():
 
 @app.route('/check_image', methods=['GET', 'POST'])
 def check_image():
-    return 'Hello world'
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image provided'}), 400
+
+    file = request.files['image'].read()
+    img = np.frombuffer(file, np.uint8)
+    img = cv2.imdecode(img, cv2.IMREAD_COLOR)
+
+    # Detect and extract face embedding
+    faces = face_app.get(img)
+    if not faces:
+        return jsonify({'error': 'No face detected'}), 400
+    return jsonify({"success": True, "message": f"Verified image"}), 200
+
 
 
 @app.route('/search', methods=['GET', 'POST'])
