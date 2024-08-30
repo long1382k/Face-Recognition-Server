@@ -1,14 +1,20 @@
-from flask import Flask
+from flask import Flask, Response, render_template
 import cv2
+from imageio.v3 import imwrite
 from insightface.app import FaceAnalysis
+from matplotlib.style.core import available
+from pyparsing import White
 from qdrant_client import QdrantClient, models
 import uuid
 from flask import Flask, request, jsonify
 import numpy as np
 import os
+from flask import Flask, render_template
+from flask_socketio import SocketIO, emit
 
 client = QdrantClient(url="http://localhost:6333")
 app = Flask(__name__)
+
 UPLOAD_FOLDER = './static/images_directory/'  # Đường dẫn cố định để lưu ảnh
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 face_app = FaceAnalysis(providers=['CUDAExecutionProvider'])
@@ -25,7 +31,6 @@ def create_new_collection(collection_name):
                     distance=models.Distance.COSINE,
                 ),
             )
-
             print(f'Created collection {collection_name}')
             # return jsonify({"success": True, "message": f"Created collection {collection_name}"}), 200
 
@@ -37,36 +42,104 @@ def create_new_collection(collection_name):
     else:
         print(f'Collection {collection_name} already exists')
     return True
+def resize_frame(frame, width=800):
+    h, w = frame.shape[:2]
+    scale = width / w
+    return cv2.resize(frame, (width, int(h * scale)))
 
-@app.route('/add_face', methods=['GET', 'POST'])
-def add_face():
-    # Initialize the InsightFace model
+def generate_frames():
+    collection_name = 'registed_face'
+    count = 0
+    camera = cv2.VideoCapture(0)  # Capture from webcam
+    while True:
+        success, frame = camera.read()
+        frame = resize_frame(frame, width=480)
+        if not success:
+            break
+        else:
+            count+=1
+            # Perform object detection here using YOLO
+            if count % 3 == 0:
+                faces = face_app.get(frame)
+                for face in faces:
+                    face_embedding = face.embedding
+
+                    # Query the Qdrant database
+                    search_result = client.search(
+                        collection_name=collection_name,
+                        query_vector=face_embedding,
+                        score_threshold=0.6,
+                        limit=1  # Adjust the limit based on your need,
+                    )
+
+                    if not search_result:
+                        print({'message': 'No similar face found'})
+                    else:
+
+                    # Return the closest match from the database
+                        print(search_result[0].payload['name'])
+
+
+            #     box = face.bbox.astype(int)
+            #     cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
+            #         # for landmark in face.landmark_2d_106:
+            #         #     cv2.circle(frame, (int(landmark[0]), int(landmark[1])), 2, (0, 0, 255), -1)
+            #         # gender, age = face.gender, int(face.age)
+            #         # label = f"{'Male' if gender == 1 else 'Female'}, {age}"
+            #         # cv2.putText(frame, label, (box[0], box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36, 255, 12), 2)
+            #
+            # ret, buffer = cv2.imencode('.jpg', frame)
+            # frame = buffer.tobytes()
+            # yield (b'--frame\r\n'
+            #        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+@app.route('/add_student', methods=['GET', 'POST'])
+def add_student():
 
     # list of student to save to database
     points = []
-
     # Define the name of the collection
     collection_name = 'registed_face'
     # check if collection is existed else create new
     if create_new_collection(collection_name):
         # Lấy các thông tin từ form
         student_id = request.form['id']
-        student_name = request.form['name']
-        student_class = request.form['class']
+        student_fullName = request.form['fullName']
+        student_className = request.form['className']
+        student_classId = request.form['classId']
+
         # Lấy file ảnh từ request
         student_image = request.files['image']
 
         # Kiểm tra và lưu file vào thư mục cố định
         if student_image:
-            filename = student_image.filename
-            os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], student_id), exist_ok=True)
-            image_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{student_id}/{filename}')
+
+
+            # Get the directory where images for this student are stored
+            student_directory = os.path.join(app.config['UPLOAD_FOLDER'], f'{student_classId}/{student_id}')
+            # Ensure the directory exists
+            os.makedirs(student_directory, exist_ok=True)
+
+            # Get the list of existing files to determine the next available integer
+            existing_files = os.listdir(student_directory)
+
+            # Filter out any non-numeric filenames and get the highest number
+            numbers = [int(os.path.splitext(f)[0]) for f in existing_files if f.split('.')[0].isdigit()]
+            next_number = max(numbers, default=0) + 1  # Start from 1 if no files are present
+
+            # Define the new filename using the next available number
+            new_filename = f"{next_number}{os.path.splitext(student_image.filename)[1]}"  # Preserve the file extension
+
+            # Save the image with the new filename
+            image_path = os.path.join(student_directory, new_filename)
             student_image.save(image_path)
+
             student = dict()
             student = {
                 "id": student_id,  # mã học viện
-                "name": student_name,  # tên học viên
-                "class": student_class,  # lớp
+                "fullName": student_fullName,  # tên học viên
+                "className": student_className,  # lớp
+                "classId": student_classId,
                 "image": image_path  # đường dẫn ảnh
             }
             img = cv2.imread(image_path)
@@ -93,10 +166,49 @@ def add_face():
         count_result = client.count(collection_name)
         record_count = count_result.count
         print({f'Uploaded {len(points)} students to {collection_name} database. Total of records: {record_count}'})
-        return jsonify({"success": True, "message": f"Added student {student_name} to database"}), 200
+        return jsonify({"success": True, "message": f"Added student {student_fullName} to database"}), 200
     else:
         return jsonify({'error': 'Failed to create collection'}), 400
 
+@app.route('/delete_student', methods=['GET', 'POST'])
+def delete_student():
+    student_id = request.form['id']
+
+@app.route('/get_all_students', methods=['GET', 'POST'])
+def get_all_students():
+    # Specify the collection name
+    collection_name = 'registed_face'
+
+    results = client.scroll(
+        collection_name=f"{collection_name}",
+        limit=10000,
+        with_payload=True,
+        with_vectors=False,
+    )
+    records = results[0]
+
+    data = []
+    for record in records:
+
+        student = record.payload
+        data.append(student)
+    # Dictionary to store grouped entries
+    grouped_data = {}
+
+    # Grouping entries by ID
+    for entry in data:
+        entry_id = entry['id']
+        if entry_id in grouped_data:
+            infor = grouped_data[entry_id][0]
+            infor['image'] = [infor['image']]
+            infor['image'].append(entry['image'])
+            infor['image_count'] = len(infor['image'])
+            grouped_data[entry_id] = infor
+        else:
+            entry['image_count'] = 1
+            grouped_data[entry_id] = [entry]
+
+    return jsonify(grouped_data), 200
 
 @app.route('/check_image', methods=['GET', 'POST'])
 def check_image():
@@ -113,11 +225,8 @@ def check_image():
         return jsonify({'error': 'No face detected'}), 400
     return jsonify({"success": True, "message": f"Verified image"}), 200
 
-
-
 @app.route('/search', methods=['GET', 'POST'])
 def search_face():
-
     # Get the collection_name parameter from the form data
     collection_name = request.form.get('collection_name')
     if not collection_name:
@@ -154,7 +263,6 @@ def search_face():
         'payload': search_result[0].payload
     })
 
-
 @app.route('/delete_collection', methods=['DELETE'])
 def delete_collection():
     # Get the collection name from the request
@@ -169,7 +277,6 @@ def delete_collection():
         return jsonify({"success": True, "message": f"Collection '{collection_name}' deleted successfully."})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-
 
 @app.route('/test_sample', methods=['POST', 'GET'])
 def test_sample():
@@ -215,6 +322,45 @@ def test_sample():
         return f'Uploaded {len(points)} students to {collection_name} database. Total of records: {record_count}'
     else:
         return jsonify({'error': 'Failed to create collection'}), 400
+
+@app.route('/video_feed')
+def video_feed():
+    generate_frames()
+
+@app.route('/count_student', methods=['GET', 'POST'])
+def count_student():
+    collection_name = 'registed_face'
+    available_students = []
+    camera_rtsp = request.form['camera_rtsp']
+    if not camera_rtsp:
+        return jsonify({'error': 'camera_rtsp is required'}), 400
+    camera = cv2.VideoCapture(0)  # Capture from webcam
+
+    while True:
+        # Read 1 frame
+        success, frame = camera.read()
+        if not success:
+            return jsonify({"success": False, "message": "Failed to read frame"}), 400
+
+        # Recognition
+        faces = face_app.get(frame)
+        cv2.imwrite('abc.jpg', frame)
+        if faces:
+            print(f'Found {len(faces)} faces')
+            break
+    for face in faces:
+        face_embedding = face.embedding
+        # Query the Qdrant database
+        search_result = client.search(
+            collection_name=collection_name,
+            query_vector=face_embedding,
+            score_threshold=0.6,
+            limit=1  # Adjust the limit based on your need,
+        )
+
+        if search_result:
+            available_students.append(search_result[0].payload)
+    return available_students
 
 
 if __name__ == '__main__':
