@@ -10,8 +10,10 @@ client = QdrantClient(url="http://localhost:6333")
 app = Flask(__name__)
 UPLOAD_FOLDER = './static/images_directory/'  # Đường dẫn cố định để lưu ảnh
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+face_app = FaceAnalysis(providers=['CUDAExecutionProvider'])
+face_app.prepare(ctx_id=0, det_size=(640, 640))
 
-def creae_collection(collection_name):
+def create_collection(collection_name):
     if not client.collection_exists(collection_name):
         try:
             client.create_collection(
@@ -21,16 +23,22 @@ def creae_collection(collection_name):
                     distance=models.Distance.COSINE,
                 ),
             )
-            print(f'Created collection {collection_name}')
+
+            #print(f'Created collection {collection_name}')
+            #return jsonify({"success": True, "message": f"Created collection {collection_name}"}), 200
+
         except Exception as e:
-            print(e)
+            return False
+            #return jsonify({f'error': 'Failed to create collection {collection_name}'}), 400
+            #print(f'Failed to create collection {collection_name}')
+            
     else:
         print(f'Collection {collection_name} already exists')
+    return True
 @app.route('/add_face', methods=['GET', 'POST'])
 def add_face():
     # Initialize the InsightFace model
-    face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-    face_app.prepare(ctx_id=0, det_size=(640, 640))
+    
 
     # list of student to save to database
     points = []
@@ -38,54 +46,57 @@ def add_face():
     # Define the name of the collection
     collection_name = 'registed_face'
     # check if collection is existed else create new
-    creae_collection(collection_name)
+    if create_collection(collection_name):
 
-    # Lấy các thông tin từ form
-    student_id = request.form['id']
-    student_name = request.form['name']
-    student_class = request.form['class']
-    # Lấy file ảnh từ request
-    student_image = request.files['image']
+        # Lấy các thông tin từ form
+        student_id = request.form['id']
+        student_name = request.form['name']
+        student_class = request.form['class']
+        # Lấy file ảnh từ request
+        student_image = request.files['image']
 
-    # Kiểm tra và lưu file vào thư mục cố định
-    if student_image:
-        filename = student_image.filename
-        os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], student_id), exist_ok=True)
-        image_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{student_id}/{filename}')
-        student_image.save(image_path)
-        student = dict()
-        student = {
-            "id": student_id, # mã học viện
-            "name": student_name, # tên học viên
-            "class": student_class, # lớp
-            "image": image_path # đường dẫn ảnh
-        }
-        img = cv2.imread(image_path)
+        # Kiểm tra và lưu file vào thư mục cố định
+        if student_image:
+            filename = student_image.filename
+            os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], student_id), exist_ok=True)
+            image_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{student_id}/{filename}')
+            student_image.save(image_path)
+            student = dict()
+            student = {
+                "id": student_id, # mã học viện
+                "name": student_name, # tên học viên
+                "class": student_class, # lớp
+                "image": image_path # đường dẫn ảnh
+            }
+            img = cv2.imread(image_path)
 
-        # Detect faces
-        faces = face_app.get(img)
-        print(len(faces))
-        if len(faces) > 0:
-            face_embedding = faces[0].embedding
-            point = models.PointStruct(
-                id=str(uuid.uuid4()),
-                vector= face_embedding.tolist(),  # Vector đã mã hóa
-                payload= student  # Dữ liệu gốc của đối tượng `student`
-            )
-            points.append(point)
-            client.upload_points(
-                collection_name=collection_name,
-                points=points,
-            )
+            # Detect faces
+            faces = face_app.get(img)
+            if len(faces) > 0:
+                face_embedding = faces[0].embedding
+                point = models.PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector= face_embedding.tolist(),  # Vector đã mã hóa
+                    payload= student  # Dữ liệu gốc của đối tượng `student`
+                )
+                points.append(point)
+                client.upload_points(
+                    collection_name=collection_name,
+                    points=points,
+                )
+            else:
+                return jsonify({'error': 'No face detected'}), 400
         else:
-            return jsonify({'error': 'No face detected'}), 400
+            return jsonify({'error': 'No image provided'}), 400
+        # Count the number of records in the collection
+        count_result = client.count(collection_name)
+        record_count = count_result.count
+        print({f'Uploaded {len(points)} students to {collection_name} database. Total of records: {record_count}'})
+        return jsonify({"success": True, "message": f"Added student {student_name} to database"}), 200
     else:
-        return jsonify({'error': 'No image provided'}), 400
-    # Count the number of records in the collection
-    count_result = client.count(collection_name)
-    record_count = count_result.count
-    print({f'Uploaded {len(points)} students to {collection_name} database. Total of records: {record_count}'})
-    return jsonify({"success": True, "message": f"Added student {student_name} to database"}), 200
+        return jsonify({'error': 'Failed to create collection'}), 400
+
+        
 
 
 @app.route('/check_image', methods=['GET', 'POST'])
@@ -93,8 +104,8 @@ def check_image():
     return 'Hello world'
 @app.route('/search', methods=['GET', 'POST'])
 def search_face():
-    face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-    face_app.prepare(ctx_id=0, det_size=(640, 640))
+    # face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+    # face_app.prepare(ctx_id=0, det_size=(640, 640))
     # Get the collection_name parameter from the form data
     collection_name = request.form.get('collection_name')
     if not collection_name:
@@ -107,7 +118,7 @@ def search_face():
     img = cv2.imdecode(img, cv2.IMREAD_COLOR)
 
     # Detect and extract face embedding
-    faces = app.get(img)
+    faces = face_app.get(img)
     if not faces:
         return jsonify({'error': 'No face detected'}), 400
     face_embedding = faces[0].embedding
@@ -145,13 +156,13 @@ def delete_collection():
 @app.route('/test_sample', methods=['POST','GET'])
 def test_sample():
     # Initialize the InsightFace model
-    face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-    face_app.prepare(ctx_id=0, det_size=(640, 640))
+    # face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+    # face_app.prepare(ctx_id=0, det_size=(640, 640))
 
     # Define the name of the collection
     collection_name = 'registed_face'
     # Create a collection if it doesn't exist
-    creae_collection(collection_name)
+    create_collection(collection_name)
     students = [
         {
             "id": "001", # mã học viện
@@ -190,4 +201,4 @@ def test_sample():
     return f'Uploaded {len(points)} students to {collection_name} database. Total of records: {record_count}'
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080,debug=False)
+    app.run(host='0.0.0.0', port=8888,debug=False)
