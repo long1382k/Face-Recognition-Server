@@ -11,10 +11,10 @@ import numpy as np
 import os
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
-
+from flask_cors import CORS
 client = QdrantClient(url="http://localhost:6333")
 app = Flask(__name__)
-
+CORS(app)
 UPLOAD_FOLDER = './static/images_directory/'  # Đường dẫn cố định để lưu ảnh
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 face_app = FaceAnalysis(providers=['CUDAExecutionProvider'])
@@ -113,8 +113,10 @@ def add_student():
 
         # Kiểm tra và lưu file vào thư mục cố định
         if student_image:
+            class_directory = os.path.join(app.config['UPLOAD_FOLDER'], f'{student_classId}')
 
-
+            if not os.path.exists(class_directory):
+                os.makedirs(class_directory)
             # Get the directory where images for this student are stored
             student_directory = os.path.join(app.config['UPLOAD_FOLDER'], f'{student_classId}/{student_id}')
             # Ensure the directory exists
@@ -334,7 +336,7 @@ def count_student():
     camera_rtsp = request.form['camera_rtsp']
     if not camera_rtsp:
         return jsonify({'error': 'camera_rtsp is required'}), 400
-    camera = cv2.VideoCapture(0)  # Capture from webcam
+    camera = cv2.VideoCapture(camera_rtsp)  # Capture from webcam
 
     while True:
         # Read 1 frame
@@ -364,4 +366,4 @@ def count_student():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8888, debug=False)
+    app.run(host='0.0.0.0', port=8088, debug=False)
