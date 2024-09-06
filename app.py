@@ -14,10 +14,7 @@ from flask_socketio import SocketIO, emit
 import queue
 import threading
 import time
-
-#new import
 from flask import Flask, render_template, Response, request, jsonify
-from aiortc import RTCPeerConnection, RTCSessionDescription
 import cv2
 import json
 import uuid
@@ -30,7 +27,7 @@ app = Flask(__name__,static_url_path='/static')
 
 UPLOAD_FOLDER = './static/images_directory/'  # Đường dẫn cố định để lưu ảnh
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-model_name = 'buffalo_sc'  # Example model name
+model_name = 'buffalo_l'  # Example model name
 face_app = FaceAnalysis(name=model_name,providers=['CUDAExecutionProvider'])
 face_app.prepare(ctx_id=0, det_size=(640, 640))
 
@@ -59,12 +56,11 @@ def create_new_collection(collection_name):
             # return jsonify({"success": True, "message": f"Created collection {collection_name}"}), 200
 
         except Exception as e:
+            print(f'Failed to create collection {collection_name}')
             return False
             # return jsonify({f'error': 'Failed to create collection {collection_name}'}), 400
-            # print(f'Failed to create collection {collection_name}')
-
     else:
-        print(f'Collection {collection_name} already exists')
+        print(f"Collection {collection_name} already exists. Don't need to create it")
     return True
 def resize_frame(frame, width=800):
     h, w = frame.shape[:2]
@@ -72,12 +68,13 @@ def resize_frame(frame, width=800):
     return cv2.resize(frame, (width, int(h * scale)))
 def generate_frames():
     collection_name = 'registed_face'
+    score_threshold = float(request.form['score_threshold'])
+
     count = 0
     camera = cv2.VideoCapture(0)  # Capture from webcam
     while True:
         process_start = time.time()
         success, frame = camera.read()
-        frame = resize_frame(frame, width=480)
         if not success:
             break
         else:
@@ -92,7 +89,7 @@ def generate_frames():
                     search_result = client.search(
                         collection_name=collection_name,
                         query_vector=face_embedding,
-                        score_threshold=0.6,
+                        score_threshold=score_threshold,
                         limit=1  # Adjust the limit based on your need,
                     )
                     #
@@ -114,7 +111,7 @@ def generate_frames():
                    b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
             process_end = time.time()
             process_time = process_end - process_start
-            print(f"Frame generation time: {process_time} seconds")
+            #print(f"Frame generation time: {process_time} seconds")
 
         #     box = face.bbox.astype(int)
             #     cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
@@ -128,35 +125,6 @@ def generate_frames():
             # frame = buffer.tobytes()
             # yield (b'--frame\r\n'
             #        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-async def offer_async():
-    params = await request.json
-    offer_var = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
-
-    # Create an RTCPeerConnection instance
-    pc = RTCPeerConnection()
-
-    # Generate a unique ID for the RTCPeerConnection
-    pc_id = "PeerConnection(%s)" % uuid.uuid4()
-    pc_id = pc_id[:8]
-
-    # Create and set the local description
-    await pc.createOffer()
-    await pc.setLocalDescription(offer_var)
-
-    # Prepare the response data with local SDP and type
-    response_data = {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-
-    return jsonify(response_data)
-def offer():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    future = asyncio.run_coroutine_threadsafe(offer_async(), loop)
-    return future.result()
-# Route to handle the offer request
-@app.route('/offer', methods=['POST'])
-def offer_route():
-    return offer()
 
 @app.route('/add_student', methods=['GET', 'POST'])
 def add_student():
@@ -178,8 +146,6 @@ def add_student():
 
         # Kiểm tra và lưu file vào thư mục cố định
         if student_image:
-
-
             # Get the directory where images for this student are stored
             student_directory = os.path.join(app.config['UPLOAD_FOLDER'], f'{student_classId}/{student_id}')
             # Ensure the directory exists
@@ -243,6 +209,8 @@ def delete_student():
 def get_all_students():
     # Specify the collection name
     collection_name = 'registed_face'
+    if not client.collection_exists(collection_name):
+        return jsonify({'error': 'Collection not existed'}), 400
 
     results = client.scroll(
         collection_name=f"{collection_name}",
@@ -251,29 +219,37 @@ def get_all_students():
         with_vectors=False,
     )
     records = results[0]
+    print(len(records))
 
-    data = []
-    for record in records:
+    if len(records) > 0:
+        data = []
+        for record in records:
+            student = record.payload
+            data.append(student)
+        # Dictionary to store grouped entries
+        grouped_data = {}
 
-        student = record.payload
-        data.append(student)
-    # Dictionary to store grouped entries
-    grouped_data = {}
 
-    # Grouping entries by ID
-    for entry in data:
-        entry_id = entry['id']
-        if entry_id in grouped_data:
-            infor = grouped_data[entry_id][0]
-            infor['image'] = [infor['image']]
-            infor['image'].append(entry['image'])
-            infor['image_count'] = len(infor['image'])
-            grouped_data[entry_id] = infor
-        else:
-            entry['image_count'] = 1
-            grouped_data[entry_id] = [entry]
+        # Grouping entries by ID
+        for entry in data:
+            entry_id = entry['id']
+            if entry_id in grouped_data:
+                #print(grouped_data[entry_id])
+                infor = grouped_data[entry_id]
+                if type(infor['image']) != list:
+                    infor['image'] = [infor['image']]
 
-    return jsonify(grouped_data), 200
+                infor['image'].append(entry['image'])
+                infor['image_count'] = len(infor['image'])
+                grouped_data[entry_id] = infor
+            else:
+                entry['image_count'] = 1
+                grouped_data[entry_id] = entry
+                print(grouped_data)
+
+        return jsonify(grouped_data), 200
+    else:
+        return jsonify({'error': 'No records found'}), 400
 
 @app.route('/check_image', methods=['GET', 'POST'])
 def check_image():
@@ -390,38 +366,40 @@ def test_sample():
 
 @app.route('/count_student', methods=['GET', 'POST'])
 def count_student():
+    frame_count = 0
     collection_name = 'registed_face'
-    available_students = []
+    available_students = set()
     camera_rtsp = request.form['camera_rtsp']
+    score_threshold = float(request.form['score_threshold'])
     if not camera_rtsp:
         return jsonify({'error': 'camera_rtsp is required'}), 400
-    camera = cv2.VideoCapture(0)  # Capture from webcam
+    camera = cv2.VideoCapture(camera_rtsp)  # Capture from webcam
 
     while True:
         # Read 1 frame
         success, frame = camera.read()
         if not success:
-            return jsonify({"success": False, "message": "Failed to read frame"}), 400
-
-        # Recognition
-        faces = face_app.get(frame)
-        cv2.imwrite('abc.jpg', frame)
-        if faces:
-            print(f'Found {len(faces)} faces')
             break
-    for face in faces:
-        face_embedding = face.embedding
-        # Query the Qdrant database
-        search_result = client.search(
-            collection_name=collection_name,
-            query_vector=face_embedding,
-            score_threshold=0.6,
-            limit=1  # Adjust the limit based on your need,
-        )
-
-        if search_result:
-            available_students.append(search_result[0].payload)
-    return available_students
+        else:
+            frame_count += 1
+            # Recognition
+            if frame_count % 10 == 0:
+                faces = face_app.get(frame)
+                if faces:
+                    #print(f'Found {len(faces)} faces')
+                    for face in faces:
+                        face_embedding = face.embedding
+                        # Query the Qdrant database
+                        search_result = client.search(
+                            collection_name=collection_name,
+                            query_vector=face_embedding,
+                            score_threshold=score_threshold,
+                            limit=1  # Adjust the limit based on your need,
+                        )
+                        if search_result:
+                            available_students.add(search_result[0].payload['fullName'])
+    print(available_students)
+    return jsonify({"success": True, "message": f"Successfully."})
 
 
 if __name__ == '__main__':
