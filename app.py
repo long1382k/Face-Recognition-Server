@@ -426,62 +426,72 @@ def add_student():
         student_className = request.form['className']
         student_classId = request.form['classId']
 
-        # Lấy file ảnh từ request
-        student_image = request.files['image']
+       # Lặp qua tất cả ảnh được tải lên từ form
+        student_images = request.files.getlist('image')  # Lấy tất cả các file ảnh từ form
 
-        # Kiểm tra và lưu file vào thư mục cố định
-        if student_image:
+        # Kiểm tra nếu có ảnh nào được tải lên
+        if student_images:
             class_directory = os.path.join(app.config['UPLOAD_FOLDER'], f'{student_classId}')
-
+            
+            # Tạo thư mục nếu chưa tồn tại
             if not os.path.exists(class_directory):
                 os.makedirs(class_directory)
-            # Get the directory where images for this student are stored
+
+            # Tạo thư mục học viên dựa trên classId và studentId
             student_directory = os.path.join(app.config['UPLOAD_FOLDER'], f'{student_classId}/{student_id}')
-            # Ensure the directory exists
             os.makedirs(student_directory, exist_ok=True)
 
-            # Get the list of existing files to determine the next available integer
-            existing_files = os.listdir(student_directory)
+            # Lặp qua từng ảnh
+            for student_image in student_images:
+                # Lấy danh sách file hiện tại trong thư mục học viên
+                existing_files = os.listdir(student_directory)
 
-            # Filter out any non-numeric filenames and get the highest number
-            numbers = [int(os.path.splitext(f)[0]) for f in existing_files if f.split('.')[0].isdigit()]
-            next_number = max(numbers, default=0) + 1  # Start from 1 if no files are present
+                # Lọc và lấy số thứ tự cao nhất
+                numbers = [int(os.path.splitext(f)[0]) for f in existing_files if f.split('.')[0].isdigit()]
+                next_number = max(numbers, default=0) + 1  # Bắt đầu từ 1 nếu không có file nào
 
-            # Define the new filename using the next available number
-            new_filename = f"{next_number}{os.path.splitext(student_image.filename)[1]}"  # Preserve the file extension
+                # Đặt tên file mới với số thứ tự và giữ nguyên phần mở rộng của file
+                new_filename = f"{next_number}{os.path.splitext(student_image.filename)[1]}"
 
-            # Save the image with the new filename
-            image_path = os.path.join(student_directory, new_filename)
-            student_image.save(image_path)
+                # Lưu ảnh với tên mới
+                image_path = os.path.join(student_directory, new_filename)
+                student_image.save(image_path)
 
-            student = dict()
-            student = {
-                "id": student_id,  # mã học viện
-                "fullName": student_fullName,  # tên học viên
-                "className": student_className,  # lớp
-                "classId": student_classId,
-                "image": image_path  # đường dẫn ảnh
-            }
-            img = cv2.imread(image_path)
+                # Xử lý thông tin học viên
+                student = {
+                    "id": student_id,
+                    "fullName": student_fullName,
+                    "className": student_className,
+                    "classId": student_classId,
+                    "image": image_path  # Đường dẫn ảnh
+                }
 
-            # Detect faces
-            faces = face_app.get(img)
-            if len(faces) > 0:
-                face_embedding = faces[0].embedding
-                point = models.PointStruct(
-                    id=str(uuid.uuid4()),
-                    vector=face_embedding.tolist(),  # Vector đã mã hóa
-                    payload=student  # Dữ liệu gốc của đối tượng `student`
-                )
-                points.append(point)
-                client.upload_points(
-                    collection_name=collection_name,
-                    points=points,
-                )
-            else:
-                return jsonify({'error': 'No face detected'}), 400
+                # Đọc ảnh đã lưu bằng OpenCV
+                img = cv2.imread(image_path)
+
+                # Phát hiện khuôn mặt
+                faces = face_app.get(img)
+                
+                # Nếu phát hiện được khuôn mặt
+                if len(faces) > 0:
+                    face_embedding = faces[0].embedding
+                    point = models.PointStruct(
+                        id=str(uuid.uuid4()),
+                        vector=face_embedding.tolist(),  # Vector mã hóa
+                        payload=student  # Dữ liệu gốc của học viên
+                    )
+                    points.append(point)
+                
+                else:
+                    return jsonify({'error': f'No face detected in image {new_filename}'}), 400
+
+            # Upload tất cả các điểm dữ liệu lên collection
+            client.upload_points(
+                collection_name=collection_name,
+                points=points,
+            )
         else:
-            return jsonify({'error': 'No image provided'}), 400
+            return jsonify({'error': 'No images provided'}), 400
         # Count the number of records in the collection
         count_result = client.count(collection_name)
         record_count = count_result.count
