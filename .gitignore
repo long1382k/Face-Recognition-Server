@@ -4,3 +4,4 @@
 /qdrant_storage
 *.jpg
 *.mp4
+/static

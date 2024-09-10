@@ -28,10 +28,12 @@ import json
 import urllib3
 from urllib.parse import urlencode
 import base64
+from flask_socketio import SocketIO, emit
 
 client = QdrantClient(url="http://localhost:6333")
 app = Flask(__name__,static_url_path='/static')
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 UPLOAD_FOLDER = './static/images_directory/'  # Đường dẫn cố định để lưu ảnh
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -149,16 +151,23 @@ def get_detection(cam_id):
     global predicting
     while True:
         if predicting[cam_id][1] == False:
+            print(f"Stopping stream for cam_id {cam_id}")
             break
         while str('Frame') not in predicting[cam_id][2]:
+            print(f"Waiting for frame for cam_id {cam_id}")
             time.sleep(0.5)
         frame = predicting[cam_id][2]['Frame']
         if frame is not None:
-            ret, buffer = cv2.imencode('.jpg', frame)
+            print(f"Sending frame for cam_id {cam_id}")
+            # ret, buffer = cv2.imencode('.jpg', frame)
+            # frame = buffer.tobytes()
+            frame = cv2.resize(frame, (640, 480))
+            ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])  # Giảm chất lượng
             frame = buffer.tobytes()
             yield (b'--frame\r\n'
-                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
         else:
+            print(f"No frame available for cam_id {cam_id}")
             break
 
 
@@ -167,111 +176,99 @@ def gen_motion_detect(cam_id):
     global predicting
     cap = predicting[cam_id][0]
 
-    # Check if the video was opened successfully
     if not cap.isOpened():
         print("Error: Could not open the video file.")
         return
-    sucess, frame_background = cap.read()
 
-    if not sucess:
+    success, frame_background = cap.read()
+
+    if not success:
         print("Error: Could not read the first frame.")
         cap.release()
         return
 
-    # Draw ROI on the background frame (first frame)
+    # Define ROI and other parameters
     roi_points = (316, 191, 723, 403)
     x_roi, y_roi, width_roi, height_roi = roi_points
     total_area = width_roi * height_roi
-    minGlobalArea = total_area * 0.1 # Độ thay đổi nhỏ nhất của toàn cục để quyết định có chuyển động
-
-
-    # Calculate the four points representing the vertices of the ROI
-    point1 = [x_roi, y_roi]
-    point2 = [x_roi + width_roi, y_roi]
-    point3 = [x_roi + width_roi, y_roi + height_roi]
-    point4 = [x_roi, y_roi + height_roi]
-
-    roi_draw =  np.array([point1, point2, point3, point4],np.int32)
+    minGlobalArea = total_area * 0.1
+    roi_draw = np.array([[x_roi, y_roi], [x_roi + width_roi, y_roi],
+                         [x_roi + width_roi, y_roi + height_roi], [x_roi, y_roi + height_roi]], np.int32)
     roi_draw = roi_draw.reshape((-1, 1, 2))
 
     count = 0
-    while (True):
+    while True:
         globalArea = 0
         ret, frame = cap.read()
-        start_time = time.time()
-        if not ret: 
-            print('Cannot read frame ')
+        if not ret:
+            print('Cannot read frame')
             break
-        
 
         if frame is not None:
-        # Remove the oldest frame to maintain the buffer size
+            frame_in_roi = crop_frame_based_on_roi(frame, roi_points)
+            bg_mask = bg_subtractor.apply(frame_in_roi)
+            bg_mask = getFilter(bg_mask, 'opening')
+            bg_mask = cv2.medianBlur(bg_mask, 5)
+            contours, _ = cv2.findContours(bg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            frame_in_roi = crop_frame_based_on_roi(frame, roi_points) # Crop frame in ROI
-            bg_mask = bg_subtractor.apply(frame_in_roi) # Áp dụng bộ lọc
-            bg_mask = getFilter(bg_mask, 'opening') # Hậu xử lý
-            bg_mask = cv2.medianBlur(bg_mask, 5) # Làm mờ 
-
-            (contours, hierarchy) = cv2.findContours(bg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) # Tìm các vùng liên thông ( contours) với tuỳ chọn RETR_EXTERNAL 
-            x1 = x_roi + width_roi
-            x2 = x_roi
-            y1 = y_roi + height_roi
-            y2 = y_roi
+            x1, x2 = x_roi + width_roi, x_roi
+            y1, y2 = y_roi + height_roi, y_roi
             motion_detected = False
-            for cnt in contours: # Xét từng vùng nhỏ 
-                localArea = cv2.contourArea(cnt) # Tính diện tích của phần thay đổi
-                
-                if localArea >= minLocalArea: # Nếu diện tích lớn hơn giá trị ngưỡng thì:
-                    globalArea = globalArea + localArea # Cộng dồn vào phần thay đổi tổng thể
-                    x_rect, y_rect, w, h = cv2.boundingRect(cnt) # Vị trí tương đối so với phần ROI
-                    x_rect = x_rect + x_roi
-                    y_rect = y_rect + y_roi
-                
-                    x1 = min(x1, x_rect)
-                    x2 = max(x_rect + w, x2)
-                    y1 = min(y1, y_rect)
-                    y2 = max(y_rect + h, y2)   
+
+            for cnt in contours:
+                localArea = cv2.contourArea(cnt)
+                if localArea >= minLocalArea:
+                    globalArea += localArea
+                    x_rect, y_rect, w, h = cv2.boundingRect(cnt)
+                    x_rect, y_rect = x_rect + x_roi, y_rect + y_roi
+                    x1, x2 = min(x1, x_rect), max(x_rect + w, x2)
+                    y1, y2 = min(y1, y_rect), max(y_rect + h, y2)
 
             if globalArea > minGlobalArea:
-                    #cv2.rectangle(frame, (10,30), (250,55), (255,0,0), -1)
-                cv2.putText(frame, 'Motion detected!', (10,50), FONT, 0.8, TEXT_COLOR, 2, cv2.LINE_AA)
+                cv2.putText(frame, 'Motion detected!', (10, 50), FONT, 0.8, TEXT_COLOR, 2, cv2.LINE_AA)
                 motion_detected = True
 
-            result = cv2.bitwise_and(frame_in_roi, frame_in_roi, mask=bg_mask)
             if motion_detected:
-                cv2.rectangle(frame, (x1,y1), (x2,y2), (255,255,255), 1)
-                results = model.predict(frame_in_roi,conf = 0.7,verbose=False,classes=[0])
+                results = model.predict(frame_in_roi, conf=0.7, verbose=False, classes=[0])  # Detect only people
                 for r in results:
                     boxes = r.boxes
                     for box in boxes:
-                        #c = box.cls
-                        class_name  = r.names[box.cls[0].item()]
+                        class_name = r.names[box.cls[0].item()]
                         prob = float(box.conf)
                         print(f'Detected {class_name} with {prob}')
-                        
-                        # send image 
-                        detected_time = time.time()
-                        cropped_image = frame_in_roi
-                        # thread_send_image1 = threading.Thread(target=send_image,args =(cropped_image,class_name,'cam_id',detected_time,1,4,))
-                        # thread_send_image1.start()
 
-                        x1_c,y1_c,x2_c,y2_c = box.xyxy[0]
-                        x1_c,y1_c,x2_c,y2_c = int(x1_c+x_roi), int(y1_c+y_roi), int(x2_c+x_roi), int(y2_c+y_roi)
-                        
-                        cv2.rectangle(frame,(x1_c,y1_c),(x2_c,y2_c),(0,0,255),thickness=2)
-                        cv2.putText(frame,class_name + ' ' + str(prob) ,(x1_c,y1_c),cv2.FONT_HERSHEY_DUPLEX,0.5,(0,0,255),2)
+                        # Check if detected object is a person
+                        if class_name == "person":
+                            detected_time = time.time()
+                            cropped_image = frame_in_roi
+                            thread_send_image1 = threading.Thread(target=send_image,
+                                                                  args=(cropped_image, class_name, 'cam_id',
+                                                                        detected_time, 1, 4,))
+                            thread_send_image1.start()
 
-            roi_color = (0, 255, 0)  # Green color for the ROI
+                            # Send socket notification to FE
+                            socketio.emit('person_detected', {
+                                'cam_id': cam_id,
+                                'detected_time': detected_time,
+                                'class_name': class_name,
+                                'probability': prob
+                            })
+
+                        # Draw bounding box
+                        x1_c, y1_c, x2_c, y2_c = box.xyxy[0]
+                        x1_c, y1_c, x2_c, y2_c = int(x1_c + x_roi), int(y1_c + y_roi), int(x2_c + x_roi), int(y2_c + y_roi)
+                        cv2.rectangle(frame, (x1_c, y1_c), (x2_c, y2_c), (0, 0, 255), thickness=2)
+                        cv2.putText(frame, class_name + ' ' + str(prob), (x1_c, y1_c),
+                                    cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 255), 2)
+
+            roi_color = (0, 255, 0)
             frame = cv2.polylines(frame, [roi_draw], isClosed=True, color=roi_color, thickness=2)
 
-            predict_results = dict()
-            predict_results['Frame'] = frame
-            predicting[cam_id][2] = predict_results   
+            predict_results = {'Frame': frame}
+            predicting[cam_id][2] = predict_results
 
     cap.release()
-    cv2.destroyAllWindows() 
-
-
+    cv2.destroyAllWindows()
 
 @app.route('/')
 def index():
@@ -310,6 +307,7 @@ def create_new_collection(collection_name):
     else:
         print(f'Collection {collection_name} already exists')
     return True
+
 def resize_frame(frame, width=800):
     h, w = frame.shape[:2]
     scale = width / w
@@ -491,7 +489,7 @@ def add_student():
                 points=points,
             )
         else:
-            return jsonify({'error': 'No images provided'}), 400
+            return jsonify({'error': 'Please add more than 1 photo'}), 400
         # Count the number of records in the collection
         count_result = client.count(collection_name)
         record_count = count_result.count
@@ -706,7 +704,9 @@ def motion_detect(cam_id):
 @app.route('/show/<path:cam_id>')
 def show(cam_id):
     # cam_lab = 'rtsp://admin:Admin123@192.168.10.64/Src/MediaInput/h264/stream_1/ch_' 
-    # cam_id = cam_lab
+    cam_lab= 'rtsp://blueai:Blueai1234@nsvanphuc.ddns.net:554/streaming/channels/1401'
+    cam_id = cam_lab
+    # cam_id = 'static/video/VIdeo_Bao_HoangAnh.mp4'
     generator = get_detection(cam_id)
     return Response(generator, mimetype='multipart/x-mixed-replace; boundary=frame')
 # STOP PREDICT

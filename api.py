@@ -135,17 +135,21 @@ minLocalArea = 50 # Độ thay đổi nhỏ nhất của các vùng nhỏ (conto
 
 def get_detection(cam_id):
     global predicting
+    print("predicting", predicting)  # Debug log
     while True:
         if predicting[cam_id][1] == False:
+            print(f"Exiting loop, predicting[{cam_id}][1] is False")
             break
-        while str('Frame') not in predicting[cam_id][2]:
+        while 'Frame' not in predicting[cam_id][2]:
+            print(f"Waiting for frame from camera {cam_id}")
             time.sleep(0.5)
         frame = predicting[cam_id][2]['Frame']
+        print(f"Frame received for camera {cam_id}: {frame is not None}")
         if frame is not None:
             ret, buffer = cv2.imencode('.jpg', frame)
             frame = buffer.tobytes()
             yield (b'--frame\r\n'
-                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
         else:
             break
 
@@ -277,8 +281,8 @@ def motion_detect(cam_id):
 
 @app.route('/show/<path:cam_id>')
 def show(cam_id):
-    cam_lab = 'rtsp://admin:Admin123@192.168.10.64/Src/MediaInput/h264/stream_1/ch_' 
-    cam_id = cam_lab
+    # cam_lab = 'rtsp://admin:Admin123@192.168.10.64/Src/MediaInput/h264/stream_1/ch_' 
+    # cam_id = cam_lab
     generator = get_detection(cam_id)
     return Response(generator, mimetype='multipart/x-mixed-replace; boundary=frame')
 # STOP PREDICT
@@ -294,4 +298,4 @@ def stop(cam_id):
 
     
 if __name__ == "__main__":
-    app.run(debug=False, host='0.0.0.0',port=5003)
+    app.run(debug=False, host='0.0.0.0',port=8088)
